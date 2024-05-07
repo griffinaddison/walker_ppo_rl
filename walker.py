@@ -11,6 +11,8 @@ import matplotlib
 matplotlib.use('Qt5Agg')
 from matplotlib import pyplot as plt
 
+import scipy.signal
+
 from tqdm import tqdm
 
 class RolloutBuffer:
@@ -92,62 +94,90 @@ class RolloutBuffer:
 
 ## U = ACTOR = POLICY
 class Actor(nn.Module):
-    def __init__(s,xdim,udim,
-                 hdim=32,fixed_var=True):
+    def __init__(self,xdim,udim,
+                 hdim=32):
         super().__init__()
-        s.xdim,s.udim = xdim, udim
-        ## Bool that disables learning of variance
-        s.fixed_var=fixed_var
+        self.xdim,self.udim = xdim, udim
 
+        # self.activation = activation
         ### TODO
 
         ## Define layers
-        s.fc1 = nn.Linear(xdim, hdim)
-        s.fc2 = nn.Linear(hdim, hdim)
-        s.output = nn.Linear(hdim, udim)
+        # self.fc1 = nn.Linear(xdim, hdim)
+        # self.fc2 = nn.Linear(hdim, hdim)
+        # self.output = nn.Linear(hdim, udim)
 
-        if not s.fixed_var:
-            # If variance not fixed, learn it as a separate parameter
-            s.log_std_layer = nn.Parameter(torch.zeros(udim) - 0.5) # 0.5 so well-formed
+
+        # # Initialize as orthogonal
+        # nn.init.orthogonal_(self.fc1.weight, gain=0.01)
+        # nn.init.orthogonal_(self.fc2.weight, gain=0.01)
+        # nn.init.orthogonal_(self.output.weight, gain=0.01)
+
+
+
+        self.mu_net = nn.Sequential(
+            nn.Linear(xdim, hdim), # Hidden layer 1 (linear)
+            nn.Tanh(),             # Hidden layer 1 (activation)
+            nn.Linear(hdim, hdim), # Hidden layer 2 (linear)
+            nn.Tanh(),             # Hidden layer 2 (activation)
+            nn.Linear(hdim, udim)  # Output layer
+        )
+
+        log_std = -0.5 * np.ones(udim, dtype=np.float32)
+        self.log_std_layer = nn.Parameter(torch.as_tensor(log_std)) # 0.5 so well-formed
 
         ### END TODO
 
-    def forward(s,x):
+    def forward(self,x):
         ### TODO
 
-        x = F.relu(s.fc1(x))
-        x = F.relu(s.fc2(x))
+        # x = F.tanh(self.fc1(x))
+        # x = F.tanh(self.fc2(x))
+        #
+        # mean = self.output(x)
 
-        mean = s.output(x)
+        mean = self.mu_net(x)
 
-        if s.fixed_var:
-            std = torch.exp(torch.zeros_like(mean))
-        else:
-            std = torch.exp(s.log_std_layer)
+        std = torch.exp(self.log_std_layer)
 
         
         pi = Normal(mean, std)
         action = pi.sample()
-        log_probs = pi.log_prob(action) # log prob of each component of the action
-        log_prob = log_probs.sum()
+        log_prob = pi.log_prob(action).sum(axis=-1) # log prob of each component of the action
         ### END TODO
         return action, log_prob
 
 class Critic(nn.Module):
-    def __init__(self, state_dim, hidden_dim=32):
+    def __init__(self, xdim, hdim=32):
         super(Critic, self).__init__()
 
+
         ## Input of state
-        self.fc1 = nn.Linear(state_dim, hidden_dim)
-        self.fc2 = nn.Linear(hidden_dim, hidden_dim)
-        self.output = nn.Linear(hidden_dim, 1)
+        # self.fc1 = nn.Linear(state_dim, hidden_dim)
+        # self.fc2 = nn.Linear(hidden_dim, hidden_dim)
+        # self.output = nn.Linear(hidden_dim, 1)
         ## Output of 1 (it outputs value given state)
 
-    def forward(self, state):
-        x = F.relu(self.fc1(state))
-        x = F.relu(self.fc2(x))
-        value = self.output(x)
-        return value
+
+        # ## Initialize as orthogonal
+        # nn.init.orthogonal_(self.fc1.weight, gain=0.01)
+        # nn.init.orthogonal_(self.fc2.weight, gain=0.01)
+        # nn.init.orthogonal_(self.output.weight, gain=0.01)
+
+        self.v_net = nn.Sequential(
+            nn.Linear(xdim, hdim),
+            nn.Tanh(),
+            nn.Linear(hdim, hdim),
+            nn.Tanh(),
+            nn.Linear(hdim, 1)
+        )
+
+    def forward(self, x):
+        # x = F.tanh(self.fc1(state))
+        # x = F.tanh(self.fc2(x))
+        # value = self.output(x)
+
+        return torch.squeeze(self.v_net(x), -1)
 
 
 
@@ -163,7 +193,7 @@ def rollout(e,actor,T=1000, render=False):
     t=e.reset()
     x=t.observation
     x=np.array(x['orientations'].tolist()+[x['height']]+x['velocity'].tolist())
-    for _ in range(T):
+    for i in range(T):
         with torch.no_grad():
             ## Sample action from pytorch nn
             u, log_prob_u = actor(torch.from_numpy(x).float().unsqueeze(0))
@@ -176,127 +206,137 @@ def rollout(e,actor,T=1000, render=False):
         traj.append(t)
         x=xp
         if r.last():
+            # print("\n done at iteration:", i)
             break
+    # print("\n finished rolling out, traj length:", len(traj))
     return traj
 
 
 
 
+def discount_cumsum(x, discount):
+    """
+    from spinningup's ppo:
+
+    magic from rllab for computing discounted cumulative sums of vectors.
+
+
+    input: 
+        vector x, 
+        [x0, 
+         x1, 
+         x2]
+
+    output:
+        [x0 + discount * x1 + discount^2 * x2,  
+         x1 + discount * x2,
+         x2]
+    """
+    return scipy.signal.lfilter([1], [1, float(-discount)], x[::-1], axis=0)[::-1]
+
 
 def compute_returns_advantages(rewards, values, dones, gamma):
     """ Compute advantages with simple formla (not GAE) """
 
+    lam = 0.97
+
+    advantages = torch.zeros_like(rewards)
+    gae = 0
+    for t in reversed(range(len(rewards))):
+        if t == len(rewards) - 1 or dones[t]:
+            next_value = 0
+        else:
+            next_value = values[t+1]
+        ## TODO: check if value should be negative
+        delta = rewards[t] + gamma * next_value - values[t]
+        gae = delta + gamma * lam * gae * (1 - dones[t])
+        advantages[t] = gae
 
     # num_steps = len(rewards)
-    # returns = torch.zeros(num_steps)
-    # advantages = torch.zeros(num_steps)
-    #
-    # # Start with the last reward, where the next value is 0 since it's the end of the episode
-    # next_value = 0
+    # returns = torch.zeros_like(rewards)
+    # _return = 0
+    # for t in reversed(range(len(rewards))):
+    #     _return = rewards[t] + gamma * _return * (1 - dones[t])  
+    #     returns[t] = _return
+
+    returns = values.detach() + advantages
+
+    # deltas = rewards[:-1] + gamma * values[1:] - values[:-1]
+    # advantages = discount_cumsum(deltas.detach().numpy(), gamma * lam)
+    # returns = discount_cumsum(rewards.detach().numpy(), gamma)[:-1]
     # 
-    # # Reverse loop through rewards to accumulate sums
-    # for t in reversed(range(num_steps)):
-    #     if dones[t]:
-    #         next_value = 0  # If the current step is terminal, next value should be reset
+    # advantages = np.copy(advantages)
+    # returns = np.copy(returns) # copy to avoid negative stride error
     #
-    #     # The return at time t is the reward at time t plus discount * next value
-    #     returns[t] = rewards[t] + gamma * next_value
-    #     next_value = returns[t]  # Update next_value to the return at time t
-    #
-    #     # The advantage is the return at time t minus the value estimate at time t
-    #     advantages[t] = returns[t] - values[t]
-    #
-    # return returns, advantages
-    lam = 0.95
-    gamma = 0.99
+    # advantages = torch.tensor(advantages, dtype=torch.float32).unsqueeze(1)
+    # returns = torch.tensor(returns, dtype=torch.float32).unsqueeze(1)
 
-    num_steps = len(rewards)
-    returns = torch.zeros(num_steps)
-    advantages = torch.zeros(num_steps)
-    next_value = 0
-    gae = 0  # Generalized advantage estimation
+    # print("\n type retutns:", type(returns)) 
+    ## Normalize advantages
+    advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-10)
 
-    for t in reversed(range(num_steps)):
-        # If the state is terminal, next_value and gae reset
-        if dones[t]:
-            next_value = 0
-            gae = 0
-        # Delta is the TD residual
-        delta = rewards[t] + gamma * next_value - values[t]
-        # Update gae
-        gae = delta + gamma * lam * gae
-        # Store the calculated advantage
-        advantages[t] = gae
-        # The return is just the value plus the advantage
-        returns[t] = advantages[t] + values[t]
-        # Update next_value to be the current value estimate
-        next_value = values[t]
+    ## Normalize returns
+    # returns = (returns - returns.mean()) / (returns.std() + 1e-8)
+
+
+
+
+
 
     return returns, advantages
 
-def update_actor(actor, actor_optimizer, buffer, advantages, clip_param, update_epochs, batch_size):
-    for epoch in range(update_epochs):
-        # Shuffle the data at the beginning of each epoch
-        data = buffer.get_shuffled_data()
+def update_actor(actor, actor_optimizer, buffer, advantages, clip_param, epochs=80):
+
+    for _ in tqdm(range(epochs), desc="Actor Update", unit="epochs"):
+
+        actor_optimizer.zero_grad()
+
+        data = buffer.data()
+        # Get log probs from new actor
+        _, new_log_probs = actor(data['states']) # Pytorch is able to batch these
         
-        for batch_idx in range(0, len(data['states']), batch_size):
-            # Extract batches correctly handling the last batch which might be smaller than batch_size
-            batch_states = data['states'][batch_idx:batch_idx+batch_size]
-            batch_actions = data['actions'][batch_idx:batch_idx+batch_size]
-            batch_old_log_probs = data['log_probs'][batch_idx:batch_idx+batch_size]
-            batch_advantages = advantages[batch_idx:batch_idx+batch_size]
-            
-            # Get log probs from new actor
-            _, new_log_probs = actor(batch_states) # Pytorch is able to batch these
-            
-            # Calculate the ratio of the new and old probabilities
-            ratios = torch.exp(new_log_probs - batch_old_log_probs)
-            
-            # Clipping method
-            # print("\n ratios.size():", ratios.size())
-            # print("\n batch_advantages:", batch_advantages)
-            
-            surr1 = ratios * batch_advantages
-            surr2 = torch.clamp(ratios, 1.0 - clip_param, 1.0 + clip_param) * batch_advantages
-            actor_loss = -torch.min(surr1, surr2).mean()  # Take the negative min of surr1 and surr2 for maximization
-            
-            ## Optimize the actor/policy based on its previous loss
-            actor_optimizer.zero_grad()
-            actor_loss.backward()
-            actor_optimizer.step()
+        # Calculate the ratio of the new and old probabilities
+        ratios = torch.exp(new_log_probs - data['log_probs'])
+        
+        # Clipping method
+        surr1 = ratios * advantages
+        surr2 = torch.clamp(ratios, 1.0 - clip_param, 1.0 + clip_param) * advantages
+        actor_loss = -(torch.min(surr1, surr2)).mean()  # Take the negative min of surr1 and surr2 for maximization
 
-def update_critic(critic, critic_optimizer, buffer, returns, update_epochs, batch_size):
-    # Fetch data once to avoid repeated processing
-    buffer_data = buffer.data()
-    states = buffer_data['states']
-    num_data = states.size(0)
 
-    for _ in range(update_epochs):
-        # Shuffle indices to ensure random batches
-        indices = torch.randperm(num_data)
+        # ## add entropy bonus
+        # entropy = -new_log_probs * torch.exp(new_log_probs)
+        # actor_loss += 0.01 * entropy.mean()
+        
+        target_kl = 0.01
+        kl = (data['log_probs'] - new_log_probs).mean().item()
+        if kl > 1.5 * target_kl:
+            break
 
-        ## For each batch
-        for start_idx in range(0, num_data, batch_size):
-            end_idx = min(start_idx + batch_size, num_data)  # Ensure we do not go out of bounds
-            batch_indices = indices[start_idx:end_idx]
+        ## Optimize the actor/policy based on its previous loss
+        actor_loss.backward()
+        actor_optimizer.step()
 
-            batch_states = states[batch_indices]
-            batch_returns = returns[batch_indices]
 
-            # Predict the value for each state in the batch
-            value_preds = critic(batch_states).squeeze(-1)  # Squeeze the last dimension if necessary
+def update_critic(critic, critic_optimizer, buffer, returns, epochs=80):
 
-            # Check if the batch is empty (important in edge cases)
-            if batch_states.size(0) == 0:
-                continue
+    data = buffer.data()
+    num_data = data['states'].size(0)
 
-            # Calculate loss
-            value_loss = F.mse_loss(value_preds, batch_returns)
+    for _ in tqdm(range(epochs), desc="Critic Update", unit="epochs"):
 
-            # Optimize the critic
-            critic_optimizer.zero_grad()
-            value_loss.backward()
-            critic_optimizer.step()
+        critic_optimizer.zero_grad()
+
+        value_preds = critic(data['states'])
+
+        # Calculate loss
+        value_loss = F.mse_loss(value_preds, returns.squeeze(axis=-1))
+        # value_loss = ((value_preds - returns) ** 2).mean()
+
+        # Optimize the critic
+        value_loss.backward()
+        critic_optimizer.step()
+
 
 def visualize_policy(env, actor, num_episodes=1):
     """ Visualize the actor's policy in the environment. """
@@ -319,15 +359,8 @@ def visualize_policy(env, actor, num_episodes=1):
         viewer.launch(env, policy)
 
 
-        # time_step = env.reset()
-        # while not time_step.last():
-        #     action, _ = actor(torch.tensor(time_step.observation['observations'], dtype=torch.float32).unsqueeze(0))
-        #     time_step = env.step(action.detach().numpy().squeeze())
-        #     env.render()  # Make sure your environment supports rendering
-
-def ppo_train(env, actor, critic, episodes, steps_per_episode, gamma=0.99, 
-              clip_param=0.2, actor_lr=1e-3, critic_lr=1e-3, update_epochs=10, 
-              batch_size=64):
+def ppo_train(env, actor, critic, episodes, traj_per_episode, gamma=0.99, 
+              clip_param=0.2, actor_lr=1e-3, critic_lr=1e-3, actor_update_epochs=80, critic_update_epochs=80):
     actor_optimizer = optim.Adam(actor.parameters(), lr=actor_lr)
     critic_optimizer = optim.Adam(critic.parameters(), lr=critic_lr)
 
@@ -336,86 +369,146 @@ def ppo_train(env, actor, critic, episodes, steps_per_episode, gamma=0.99,
     buffer = RolloutBuffer(action_dim)
 
 
-    episode_rewards = []
-    moving_avg_rewards = []
+    episode_returns = []
+    episode_lengths = []
+    episode_max_advantages = []
 
-    
-    for episode in tqdm(range(episodes)):
+    all_returns = []
 
-        
-        # if episode % 10 == 0:
-        #     print("\n episode:", episode)
-        #     print("\n episode_length:", len(episode_rewards))
-        #     # visualize the policy
-        #     policy = lambda x: actor(torch.tensor(x, dtype=torch.float32).
-        #                 unsqueeze(0))[0].detach().numpy()
-        #     viewer.launch(env, policy=policy)
 
-        if episode % 50000 == 0 and episode > 0:
+    for episode in tqdm(range(episodes), desc="Training PPO", unit="episodes"):
+
+        ep_ret = 0
+        ep_len = 0
+
+        # if episode % 10000 == 0:
+        if episode == episodes - 1:
             print(f"Visualizing policy at episode {episode}")
             visualize_policy(env, actor)
 
-        episode_return = 0
+        trajectory_returns = torch.tensor([], dtype=torch.float32)
+        trajectory_lengths = torch.tensor([], dtype=torch.float32)
+
         ## Step 3: Rollout current policy 
+        for traj_idx in tqdm(range(traj_per_episode), desc="Rollout", unit="trajectories"):
 
-        total_steps = 0
-        num_traj_per_episode = 0
-
-        # Do it repeatedly until a certain total number of time steps
-        while total_steps < steps_per_episode:
-            # Rollout one trajectory, for at most the remaining steps of this episode
-            trajectory = rollout(env, actor, steps_per_episode - total_steps)
-            total_steps += len(trajectory)
-            num_traj_per_episode += 1
+            trajectory = rollout(env, actor)
+            trajectory_lengths = torch.cat((trajectory_lengths, torch.tensor([len(trajectory)])))
 
             for step in trajectory:
                 # Ask critic to estimate the value of this state
                 v = critic(torch.tensor(step['xp'], dtype=torch.float32).unsqueeze(0)).item()
                 # Then store this step in the data buffer
                 buffer.store(step['xp'], step['u'], step['r'], step['d'], step['logp_u'], v)
-                episode_return += step['r']
+                # if(step['d']):
+                #     print("\n done at step", step['d'])
+                ep_ret += step['r']
+                ep_len += 1
+
+            # trajectory_returns = torch.cat((trajectory_returns, returns.mean().reshape(1)))
+        episode_lengths.append(trajectory_lengths.mean())
+
+        all_returns.append(ep_ret)
 
 
-            if len(buffer.states) >= batch_size:
-
-                ## Step 4 & 5: Compute rewards-to-go and advantages
-                returns, advantages = compute_returns_advantages(buffer.rewards, buffer.values, buffer.dones, gamma)
-                ## Step 6 & 7 Update policy and value networks
-                update_actor(actor, 
-                              actor_optimizer, 
-                              buffer,
-                              advantages, 
-                              clip_param, 
-                              update_epochs, 
-                              batch_size)
-
-                update_critic(critic, 
-                             critic_optimizer, 
-                             buffer,
-                             returns,
-                             update_epochs,
-                             batch_size)
-
-                # if total_steps % 10000 == 0:
-                #     ## Visualize new policy
-                #     policy = lambda x: actor(torch.tensor(x, dtype=torch.float32).
-                #                 unsqueeze(0))[0].detach().numpy()
-                #     viewer.launch(env, policy=policy)
-
-                buffer.clear()
-
-        episode_rewards.append(episode_return)
+        ## Step 4 & 5: Compute rewards-to-go and advantages
+        returns, advantages = compute_returns_advantages(buffer.rewards, \
+                                                         buffer.values, \
+                                                         buffer.dones, \
+                                                         gamma)
         
-        moving_avg_rewards.append(np.mean(episode_rewards[-10:]))
-        print("\n num_traj_per_episode: ", num_traj_per_episode,\
-              " episode_reward:", episode_return, \
-              " moving_avg_reward:", moving_avg_rewards[-1])
+        # advantages = advantages * 1e8
+        episode_returns.append(returns.mean().item())
+        episode_max_advantages.append(advantages.max().item())
+
+
+        ## Step 6 & 7 Update policy and value networks
+        update_actor(actor, 
+                      actor_optimizer, 
+                      buffer,
+                      advantages, 
+                      clip_param,
+                      epochs=actor_update_epochs)
+
+        update_critic(critic, 
+                     critic_optimizer, 
+                     buffer,
+                     returns,
+                     epochs=critic_update_epochs)
+
+        # env.reset()
+        buffer.clear()
+
+        # print("\n trajectory_returns.mean():", trajectory_returns.mean())
+        # print("\n trajectory_returns:", trajectory_returns)
+
+        # episode_returns.append(trajectory_returns.mean())
+        print("\n episode:", episode, "\n episode_return:", episode_returns[-1], "\n episode_advantage.max:", episode_max_advantages[-1], "\n ep_ret: ", ep_ret, "\n ep_len: ", ep_len)
+
+
+            
+        # # Do it repeatedly until a certain total number of time steps
+        # while total_steps < steps_per_episode:
+        #     # Rollout one trajectory, for at most the remaining steps of this episode
+        #     trajectory = rollout(env, actor, steps_per_episode - total_steps)
+        #     total_steps += len(trajectory)
+        #     num_traj_per_episode += 1
+        #
+        #     for step in trajectory:
+        #         # Ask critic to estimate the value of this state
+        #         v = critic(torch.tensor(step['xp'], dtype=torch.float32).unsqueeze(0)).item()
+        #         # Then store this step in the data buffer
+        #         buffer.store(step['xp'], step['u'], step['r'], step['d'], step['logp_u'], v)
+        #         # episode_return += step['r']
+        #         episode_return += step['r']
+        #         episode_length += 1
+        #
+        #
+        #     if len(buffer.states) >= batch_size:
+        #
+        #         ## Step 4 & 5: Compute rewards-to-go and advantages
+        #         returns, advantages = compute_returns_advantages(buffer.rewards, buffer.values, buffer.dones, gamma)
+        #         # print("\n returns.mean():", returns.mean(), " advantages.mean():", advantages.mean())
+        #         env.reset()
+        #
+        #         ## Step 6 & 7 Update policy and value networks
+        #         update_actor(actor, 
+        #                       actor_optimizer, 
+        #                       buffer,
+        #                       advantages, 
+        #                       clip_param,
+        #                       epochs=actor_update_epochs)
+        #
+        #         update_critic(critic, 
+        #                      critic_optimizer, 
+        #                      buffer,
+        #                      returns,
+        #                      epochs=critic_update_epochs)
+        #
+        #         # if total_steps % 10000 == 0:
+        #         #     ## Visualize new policy
+        #         #     policy = lambda x: actor(torch.tensor(x, dtype=torch.float32).
+        #         #                 unsqueeze(0))[0].detach().numpy()
+        #         #     viewer.launch(env, policy=policy)
+        #
+        #         buffer.clear()
+        #
+        # # episode_rewards.append(episode_return)
+        # # episode_rewards.append(returns.mean())
+        # episode_returns.append(episode_return)
+        # episode_lengths.append(episode_length)
+        # 
+        # # moving_avg_rewards.append(np.mean(episode_rewards[-10:]))
+        # # print("\n num_traj_per_episode: ", num_traj_per_episode,\
+        # #       " returns.mean():", returns.mean(), \
+        # #       " moving_avg_reward:", moving_avg_rewards[-1])
 
 
 
 
 
-    return actor, critic, episode_rewards, moving_avg_rewards
+
+    return actor, critic, episode_returns, episode_lengths
 
 
 
@@ -448,32 +541,34 @@ def ppo_train(env, actor, critic, episodes, steps_per_episode, gamma=0.99,
 # # print("\n len(traj):", len(traj))
 
 # Setup the environment
-env = suite.load(domain_name="walker", task_name="walk")
+
+r0 = np.random.RandomState(42)
+env = suite.load("walker", "walk", task_kwargs={'random': False})
+## this was wrong, below is correct way of instantiation env
+
 
 # Parameters
 state_dim = 14+1+9  # Adapt based on your specific environment
 action_dim = env.action_spec().shape[0]
-hidden_dim = 64  # You can adjust this
+hidden_dim_actor = 32  # You can adjust this
+hidden_dim_critic = 32
 gamma = 0.99
 clip_param = 0.2
-actor_lr = 1e-0
-critic_lr = 1e-0
-update_epochs = 10
-batch_size = 64
+actor_lr = 3e-5
+critic_lr = 1e-3
+actor_update_epochs = 25 
+critic_update_epochs = 25 
 episodes = 100 
-steps_per_episode = 2048
+traj_per_episode = 10
 
 # Initialize actor and critic networks
-actor = Actor(xdim=state_dim, udim=action_dim, hdim=hidden_dim, fixed_var=False)
-critic = Critic(state_dim, hidden_dim)
+actor = Actor(xdim=state_dim, udim=action_dim, hdim=hidden_dim_actor)
+critic = Critic(state_dim, hdim=hidden_dim_critic)
 
-# Initialize optimizers
-actor_optimizer = optim.Adam(actor.parameters(), lr=actor_lr)
-critic_optimizer = optim.Adam(critic.parameters(), lr=critic_lr)
 
 # Run the training loop
-actor, critic, episode_rewards, moving_avg_rewards = ppo_train(env, actor, critic, episodes, steps_per_episode, gamma, 
-                          clip_param, actor_lr, critic_lr, update_epochs, batch_size)
+actor, critic, episode_returns, episode_lengths = ppo_train(env, actor, critic, episodes, traj_per_episode, gamma, 
+                          clip_param, actor_lr, critic_lr, actor_update_epochs, critic_update_epochs)
 
 print("Training completed!")
 
@@ -483,19 +578,20 @@ visualize_policy(env, actor)
 # Plotting
 plt.ion()
 plt.figure(figsize=(10, 5))
-plt.plot(episode_rewards, label='Episode Return')
+plt.plot(episode_returns, label='Episode Return')
+# plt.plot(episode_lengths, label='Episode Length')
 # plt.plot(moving_avg_rewards, label='Moving Average (10 episodes)', linestyle='--')
 plt.xlabel('Episodes')
-plt.ylabel('Total Return')
+# plt.ylabel('Total Return')
 plt.title('Training Progress')
 plt.legend()
 plt.grid(True)
 plt.show(block=True)
 
 # dummy data to make sure plt is working
-plt.figure(2)
-plt.plot([1, 2, 3, 4])
-plt.show()
+# plt.figure(2)
+# plt.plot([1, 2, 3, 4])
+# plt.show()
 
 
 
