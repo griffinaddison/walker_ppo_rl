@@ -461,8 +461,8 @@ def visualize_policy(env, actor, num_episodes=1):
 def ppo_train(env, actor_critic, episodes, steps_per_episode, gamma=0.99, lam=0.97, 
               clip_param=0.2, actor_lr=1e-3, critic_lr=1e-3, actor_update_epochs=80, critic_update_epochs=80):
     
-    actor_optimizer = optim.Adam(ac.pi.parameters(), lr=actor_lr)
-    critic_optimizer = optim.Adam(ac.v.parameters(), lr=critic_lr)
+    actor_optimizer = optim.Adam(actor_critic.pi.parameters(), lr=actor_lr)
+    critic_optimizer = optim.Adam(actor_critic.v.parameters(), lr=critic_lr)
 
     # get action dim
     action_dim = env.action_spec().shape[0]
@@ -720,14 +720,14 @@ env = suite.load("walker", "walk", task_kwargs={'random': False})
 
 
 # Parameters
-state_dim = 14+1+9  # Adapt based on your specific environment
-action_dim = env.action_spec().shape[0]
-hidden_dim_actor = 32  # You can adjust this
-hidden_dim_critic = 32
+U = env.action_spec(); action_dim = U.shape[0]
+X = env.observation_spec(); state_dim = 14 + 1 + 9
+hidden_dim_actor = 64  # You can adjust this
+hidden_dim_critic = 64
 gamma = 0.95
 lam = 0.97
 clip_param = 0.2
-actor_lr = 3e-5
+actor_lr = 3e-4
 critic_lr = 1e-3
 actor_update_epochs = 80 
 critic_update_epochs = 80 
