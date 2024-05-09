@@ -602,8 +602,8 @@ actor_lr = 3e-4
 critic_lr = 1e-3
 actor_update_epochs = 80 
 critic_update_epochs = 80 
-episodes = 100 
-steps_per_episode = 4000
+episodes = 500 
+steps_per_episode = 10000
 max_ep_len = 1000
 
 # Initialize actor and critic networks
