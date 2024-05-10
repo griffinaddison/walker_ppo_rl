@@ -128,25 +128,6 @@ def update_critic(actor_critic, critic_optimizer, buffer, returns, epochs=80):
         critic_optimizer.step()
 
 
-def visualize_policy(env, actor, num_episodes=1):
-    """ Visualize the actor's policy in the environment. """
-    # print("Available keys in observation:", time_step.observation.keys())
-    def policy(time_step):
-        # Ensure observation is 
-        obs=time_step.observation
-        obs=np.array(obs['orientations'].tolist()+[obs['height']]+obs['velocity'].tolist())        # obs = time_step.observation['observations']
-        obs_tensor = torch.tensor(obs, dtype=torch.float32)  # Add batch dimension
-        pi, _ = actor(obs_tensor)
-        action = pi.sample()
-        
-        if np.any(np.isnan(action)):
-            print("NaN detected in action output")
-        
-        return action
-
-    for _ in range(num_episodes):
-        viewer.launch(env, policy)
-
 
 def ppo_train(env, actor_critic, episodes, steps_per_episode, max_ep_len=1000, gamma=0.99, lam=0.97, 
               clip_param=0.2, actor_lr=1e-3, critic_lr=1e-3, actor_update_epochs=80, critic_update_epochs=80):
@@ -233,6 +214,35 @@ def ppo_train(env, actor_critic, episodes, steps_per_episode, max_ep_len=1000, g
     return actor_critic, episode_returns, episode_lengths
 
 
+def visualize_policy(env, actor, num_episodes=1):
+    """ Visualize the actor's policy in the environment. """
+    # print("Available keys in observation:", time_step.observation.keys())
+    def policy(time_step):
+        # Ensure observation is 
+        obs=time_step.observation
+        obs=np.array(obs['orientations'].tolist()+[obs['height']]+obs['velocity'].tolist())        # obs = time_step.observation['observations']
+        obs_tensor = torch.tensor(obs, dtype=torch.float32)  # Add batch dimension
+        pi, _ = actor(obs_tensor)
+        action = pi.sample()
+        
+        # if np.any(np.isnan(action)):
+        #     print("NaN detected in action output")
+        
+        return action
+
+    for _ in range(num_episodes):
+        viewer.launch(env, policy)
+
+
+def load_and_visualize(env, actor_critic, model_path):
+    
+    actor_critic.load_state_dict(torch.load(model_path))
+
+    visualize_policy(env, actor_critic.pi)
+
+    
+
+
 
 
 # Setup the environment
@@ -265,19 +275,24 @@ max_ep_len = 1000
 ac_kwargs = {}
 actor_critic = MLPActorCritic(state_dim, action_dim, **ac_kwargs)
 
+
+model_path = "/home/griffin/Documents/ese6500-hw4/models/PPO-1715281361/actor_critic_700.pth"
+load_and_visualize(env, actor_critic, model_path)
+
+
 # Run the training loop
-actor_critic, episode_returns, episode_lengths = ppo_train(env, 
-                                                           actor_critic, 
-                                                           episodes,
-                                                           steps_per_episode, 
-                                                           max_ep_len,
-                                                           gamma,
-                                                           lam,
-                                                           clip_param, 
-                                                           actor_lr, 
-                                                           critic_lr, 
-                                                           actor_update_epochs, 
-                                                           critic_update_epochs)
+# actor_critic, episode_returns, episode_lengths = ppo_train(env, 
+#                                                            actor_critic, 
+#                                                            episodes,
+#                                                            steps_per_episode, 
+#                                                            max_ep_len,
+#                                                            gamma,
+#                                                            lam,
+#                                                            clip_param, 
+#                                                            actor_lr, 
+#                                                            critic_lr, 
+#                                                            actor_update_epochs, 
+#                                                            critic_update_epochs)
 
 print("Training completed!")
 
