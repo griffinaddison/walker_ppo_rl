@@ -233,7 +233,6 @@ def visualize_policy(env, actor, num_episodes=1):
     for _ in range(num_episodes):
         viewer.launch(env, policy)
 
-
 def load_and_visualize(env, actor_critic, model_path):
     
     actor_critic.load_state_dict(torch.load(model_path))
@@ -276,9 +275,6 @@ ac_kwargs = {}
 actor_critic = MLPActorCritic(state_dim, action_dim, **ac_kwargs)
 
 
-model_path = "/home/griffin/Documents/ese6500-hw4/models/PPO-1715281361/actor_critic_700.pth"
-load_and_visualize(env, actor_critic, model_path)
-
 
 # Run the training loop
 # actor_critic, episode_returns, episode_lengths = ppo_train(env, 
@@ -295,6 +291,10 @@ load_and_visualize(env, actor_critic, model_path)
 #                                                            critic_update_epochs)
 
 print("Training completed!")
+
+model_path = "/home/griffin/Documents/ese6500-hw4/models/PPO-1715281361/actor_critic_700.pth"
+load_and_visualize(env, actor_critic, model_path)
+
 
 # Plotting
 plt.ion()
