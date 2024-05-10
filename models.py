@@ -1,8 +1,7 @@
-# CODE IS FROM OPENAI SPINNINGUP core.ppy IMPLEMENTATION
+## The following is from OpenAI's SpinningUp
 
 import numpy as np
 import scipy.signal
-
 import torch
 import torch.nn as nn
 from torch.distributions.normal import Normal
